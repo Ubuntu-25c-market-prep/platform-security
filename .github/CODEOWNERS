@@ -1,0 +1,5 @@
+# Policy and Zero Trust. Security owns admission control, ZeroTrust owns mesh identity.
+/kyverno/    @Ubuntu-25c-market-prep/security
+/policy-reporter/ @Ubuntu-25c-market-prep/security
+/zerotrust/  @Ubuntu-25c-market-prep/zerotrust
+*            @Ubuntu-25c-market-prep/cto
