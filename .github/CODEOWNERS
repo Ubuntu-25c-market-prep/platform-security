@@ -1,4 +1,8 @@
 # Policy and Zero Trust. Security owns admission control, ZeroTrust owns mesh identity.
+#
+# Carved back out of gitops-flux by ADR 0011: admission control decides what may
+# run, so its review population is a separate blast radius and does not sit one
+# mis-scoped path entry away from six other workstreams.
 /kyverno/    @Ubuntu-25c-market-prep/security
 /policy-reporter/ @Ubuntu-25c-market-prep/security
 /zerotrust/  @Ubuntu-25c-market-prep/zerotrust
