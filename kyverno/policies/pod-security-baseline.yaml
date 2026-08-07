@@ -1,0 +1,63 @@
+# kyverno/policies/pod-security-baseline.yaml
+#
+# Baseline Pod Security Standard checks, in Audit mode.
+# Target: platform-security issue #2 — "Author pod security baseline policies in audit mode"
+#
+# Audit mode: violations are reported (visible via Policy Reporter / `kubectl
+# get polr`), nothing is blocked yet. Once this has been watched for a sprint
+# with no unexpected violations, a separate PR promotes it to Enforce mode,
+# per the promotion process documented in the repo README.
+
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: pod-security-baseline
+  annotations:
+    policies.kyverno.io/title: Pod Security Baseline
+    policies.kyverno.io/category: Pod Security Standards (Baseline)
+    policies.kyverno.io/description: >-
+      Disallows privileged containers and host namespace access (hostPID,
+      hostIPC, hostNetwork). These give a pod root-equivalent access to the
+      node it's running on, which defeats namespace isolation.
+spec:
+  validationFailureAction: Audit
+  background: true
+  rules:
+    - name: disallow-privileged-containers
+      match:
+        any:
+          - resources:
+              kinds:
+                - Pod
+      validate:
+        message: >-
+          Privileged containers are not allowed. Privileged mode gives a
+          container root-equivalent access to the host node.
+        pattern:
+          spec:
+            =(ephemeralContainers):
+              - =(securityContext):
+                  =(privileged): "false"
+            =(initContainers):
+              - =(securityContext):
+                  =(privileged): "false"
+            containers:
+              - =(securityContext):
+                  =(privileged): "false"
+
+    - name: disallow-host-namespaces
+      match:
+        any:
+          - resources:
+              kinds:
+                - Pod
+      validate:
+        message: >-
+          Sharing the host's network, PID, or IPC namespace is not allowed.
+          This gives a pod visibility into (or control over) processes and
+          network traffic on the node itself.
+        pattern:
+          spec:
+            =(hostPID): "false"
+            =(hostIPC): "false"
+            =(hostNetwork): "false"
