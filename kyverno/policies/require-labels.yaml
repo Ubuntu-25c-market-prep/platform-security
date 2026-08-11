@@ -1,0 +1,40 @@
+# kyverno/policies/require-labels.yaml
+#
+# Requires two labels on every Pod: workstream and owner.
+# Target: platform-security issue #3 — "Enforce required workstream and owner labels"
+#
+# Unlike the pod-security-baseline policy, this one goes straight to Enforce
+# mode. Missing labels don't break anything at runtime, so there's low risk in
+# blocking rather than reporting -- and cost reporting depends on ownership
+# being present on everything, not "eventually."
+
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: require-labels
+  annotations:
+    policies.kyverno.io/title: Require Workstream and Owner Labels
+    policies.kyverno.io/category: Best Practices
+    policies.kyverno.io/description: >-
+      Every Pod must carry a u25c.io/workstream and u25c.io/owner label.
+      These drive cost attribution and answer "who owns this" during an
+      incident.
+spec:
+  validationFailureAction: Enforce
+  background: true
+  rules:
+    - name: check-required-labels
+      match:
+        any:
+          - resources:
+              kinds:
+                - Pod
+      validate:
+        message: >-
+          Missing required label(s). Every Pod must have both
+          "u25c.io/workstream" and "u25c.io/owner" set.
+        pattern:
+          metadata:
+            labels:
+              u25c.io/workstream: "?*"
+              u25c.io/owner: "?*"
