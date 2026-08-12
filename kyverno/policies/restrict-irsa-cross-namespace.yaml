@@ -1,0 +1,53 @@
+# kyverno/policies/restrict-irsa-cross-namespace.yaml
+#
+# Guardrail for IRSA (IAM Roles for Service Accounts) role ARNs.
+# Target: platform-security issue #4 — "Add policies restricting cross-namespace IRSA usage"
+#
+# The real fix for this lives on the AWS side: an IAM role's trust policy
+# should be locked to a specific namespace:serviceaccount, not assumable from
+# anywhere. Kyverno can't inspect or enforce AWS IAM trust policies directly.
+#
+# As a guardrail on the Kubernetes side, this requires that any ServiceAccount
+# wired up for IRSA has its own namespace name embedded in its role ARN. This
+# makes it obvious (and enforceable) if a role is meant for one namespace but
+# gets attached to a ServiceAccount in a different one.
+#
+# Landing in Audit mode first since this is a new convention -- want to see
+# what it catches on real ServiceAccounts before blocking anything.
+
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: restrict-irsa-cross-namespace
+  annotations:
+    policies.kyverno.io/title: Restrict IRSA Role ARNs to Their Own Namespace
+    policies.kyverno.io/category: IAM / Workload Identity
+    policies.kyverno.io/description: >-
+      Requires a ServiceAccount's eks.amazonaws.com/role-arn annotation to
+      include that ServiceAccount's own namespace, so an IAM role can't be
+      silently reused across namespaces without it being obvious in the ARN.
+spec:
+  validationFailureAction: Audit
+  background: true
+  rules:
+    - name: irsa-role-must-match-namespace
+      match:
+        any:
+          - resources:
+              kinds:
+                - ServiceAccount
+      preconditions:
+        all:
+          - key: "{{ request.object.metadata.annotations.\"eks.amazonaws.com/role-arn\" || '' }}"
+            operator: NotEquals
+            value: ""
+      validate:
+        message: >-
+          This ServiceAccount's eks.amazonaws.com/role-arn must include its
+          own namespace ("{{ request.object.metadata.namespace }}") in the
+          role name, so the IAM role can't be silently shared across
+          namespaces.
+        pattern:
+          metadata:
+            annotations:
+              eks.amazonaws.com/role-arn: "*{{ request.object.metadata.namespace }}*"
