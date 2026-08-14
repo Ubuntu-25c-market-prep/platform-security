@@ -1,0 +1,73 @@
+###############################################################################
+# PeerAuthentication - PERMISSIVE, namespace-scoped
+#
+# Step one of the mTLS rollout described in ../README.md.
+#
+# PERMISSIVE accepts both mTLS and plaintext on the same port. Once a namespace
+# is labelled for sidecar injection and its workloads have restarted, traffic
+# between meshed pods is encrypted automatically while anything not yet meshed
+# keeps working. STRICT is a separate, one-line pull request per namespace once
+# PERMISSIVE has been observed for a sprint.
+#
+# These objects are deliberately inert on merge. No namespace currently carries
+# the injection label, so there are no sidecars to enforce anything. That is
+# intended: the policy lands, is reviewed, and is already in place when
+# injection is switched on.
+#
+# WHAT THIS FILE DELIBERATELY DOES NOT DO
+#
+# There is no mesh-wide PeerAuthentication here. A policy in the root namespace
+# (platform-istio, relocated from istio-system) applies to the ingress gateway,
+# which is the only pod in the cluster currently running istio-proxy. External
+# clients arriving through the NLB do not present client certificates. A
+# mesh-wide STRICT policy would reject them and take the front door down.
+#
+# Mesh-wide comes last, in its own pull request, with the gateway's inbound port
+# explicitly exempted via portLevelMtls.
+###############################################################################
+
+apiVersion: security.istio.io/v1
+kind: PeerAuthentication
+metadata:
+  name: default
+  namespace: lab-observability
+  labels:
+    u25c.io/workstream: zerotrust
+    u25c.io/owner: zerotrust
+  annotations:
+    u25c.io/rollout-stage: "permissive"
+    u25c.io/promote-to-strict: "after one sprint of observation"
+spec:
+  mtls:
+    mode: PERMISSIVE
+
+---
+apiVersion: security.istio.io/v1
+kind: PeerAuthentication
+metadata:
+  name: default
+  namespace: cert-manager
+  labels:
+    u25c.io/workstream: zerotrust
+    u25c.io/owner: zerotrust
+  annotations:
+    u25c.io/rollout-stage: "permissive"
+    u25c.io/promote-to-strict: "after one sprint of observation"
+spec:
+  mtls:
+    mode: PERMISSIVE
+
+###############################################################################
+# Namespaces deliberately excluded at this stage
+#
+#   platform-istio  - root namespace. Holds the ingress gateway. Anything here
+#                     affects north-south traffic; handled separately and last.
+#   kube-system     - control plane components, several of which will never be
+#                     meshed. Needs its own decision, not a default.
+#   flux-system     - Flux reconciles the mesh itself. Meshing the thing that
+#                     manages the mesh is a bootstrapping problem, not a
+#                     security improvement.
+#   karpenter       - manages nodes, must keep working during a mesh outage.
+#   sealed-secrets  - same reasoning; recovery path must not depend on the mesh.
+#   default         - should have no workloads. If it does, that is the finding.
+###############################################################################
