@@ -27,10 +27,10 @@
 ###############################################################################
 
 apiVersion: security.istio.io/v1
-kind: PeerAuthentication
+kind: PeerAuthentication                   #governs traffic between workloads inside the mesh
 metadata:
-  name: default
-  namespace: lab-observability
+  name: default                            #applies to every workload in the namespace
+  namespace: monitoring
   labels:
     u25c.io/workstream: zerotrust
     u25c.io/owner: zerotrust
@@ -45,7 +45,7 @@ spec:
 apiVersion: security.istio.io/v1
 kind: PeerAuthentication
 metadata:
-  name: default
+  name: default     
   namespace: cert-manager
   labels:
     u25c.io/workstream: zerotrust
