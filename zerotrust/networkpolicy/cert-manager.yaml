@@ -1,0 +1,215 @@
+###############################################################################
+# cert-manager - default-deny with an explicit allow-list
+#
+# Step one of the NetworkPolicy rollout described in ../README.md. cert-manager
+# is first because its traffic is enumerable: it watches the API server, talks
+# to Route 53 and Let's Encrypt, serves a webhook, and exposes metrics. Nothing
+# else calls it.
+#
+# INERT ON MERGE. The VPC CNI node agent runs with
+# --enable-network-policy=false, so NetworkPolicy objects are accepted by the
+# API server and never enforced. Confirmed 18 August 2026:
+#
+#   kubectl get ds aws-node -n kube-system -o yaml | grep -i network-policy
+#
+# That is a silent failure mode, not a safe one - a policy that appears to be
+# protecting a namespace and is not. Enabling enforcement is a one-line change
+# to the aws-vpc-cni HelmRelease and belongs to @infra.
+#
+# SEQUENCING MATTERS. Enabling enforcement while no policies exist changes
+# nothing, because the default is allow-all. Enabling it after these land starts
+# denying traffic immediately. Whoever flips the flag should do so knowing which
+# namespaces already carry a default-deny, and should watch cert-manager first.
+###############################################################################
+
+# --- 1. Default deny -------------------------------------------------------
+#
+# An empty podSelector selects every pod in the namespace. Naming both policy
+# types means neither direction is left at allow-all; omitting `egress` here is
+# the common mistake, and it leaves outbound traffic wide open while the policy
+# looks complete.
+
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny
+  namespace: cert-manager
+  labels:
+    u25c.io/workstream: zerotrust
+  annotations:
+    u25c.io/rollout-stage: "written, not enforced"
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+    - Egress
+
+---
+# --- 2. DNS ----------------------------------------------------------------
+#
+# First allow, always. Without name resolution nothing else works, and the
+# failure presents as timeouts rather than as a policy denial - which is why
+# this is the rule people forget and then spend an afternoon on.
+#
+# UDP is the normal path; TCP 53 is used for responses too large for a UDP
+# datagram, which DNS-01 challenge records can be.
+
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-dns-egress
+  namespace: cert-manager
+  labels:
+    u25c.io/workstream: zerotrust
+spec:
+  podSelector: {}
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+
+---
+# --- 3. Outbound HTTPS -----------------------------------------------------
+#
+# cert-manager needs to reach four things that all live outside the cluster:
+#
+#   - the EKS API server, whose endpoint is public on this cluster
+#   - Route 53 and STS, for the DNS-01 solver and for IRSA credentials
+#   - the Let's Encrypt ACME directory
+#   - public authoritative DNS, to self-check that the _acme-challenge TXT
+#     record has propagated before asking Let's Encrypt to validate
+#
+# NetworkPolicy selects by pod and namespace, not by hostname, so none of those
+# can be named here. AWS publishes its API ranges and they change; Let's
+# Encrypt does not publish stable addresses at all.
+#
+# So this is 0.0.0.0/0 on 443, with RFC1918 and the link-local metadata address
+# carved out. That is honest about what it achieves: it does not restrict where
+# cert-manager can reach on the internet. What it does restrict is lateral
+# movement - a compromised cert-manager pod cannot reach another namespace's
+# services, which is the threat this layer exists for. Egress filtering by
+# destination needs a proxy or a CNI that resolves names, and neither is in
+# scope here.
+
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-external-https-egress
+  namespace: cert-manager
+  labels:
+    u25c.io/workstream: zerotrust
+spec:
+  podSelector: {}
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.0.0.0/8
+              - 172.16.0.0/12
+              - 192.168.0.0/16
+              - 169.254.169.254/32
+      ports:
+        - protocol: TCP
+          port: 443
+
+---
+# --- 4. Kubelet and API server ingress -------------------------------------
+#
+# THE DANGEROUS ONE. Two different callers, both arriving from outside the pod
+# network, both invisible to a podSelector.
+#
+# The API SERVER calls the admission webhook on every write to a cert-manager
+# resource. Block it and writes to Certificate and Issuer objects start failing
+# rather than silently skipping.
+#
+# The KUBELET calls liveness probes from the node. Block those and the pod
+# fails its probe and restart-loops - which looks like an application fault,
+# not a network policy.
+#
+# Ports, all read from the running pods on 18 August 2026 rather than assumed:
+#
+#   webhook     10250  admission webhook, called by the API server
+#   webhook      6080  liveness probe (named port `healthcheck`)
+#   controller   9403  liveness probe (named port `http-healthz`)
+#   cainjector      -  no probe
+#
+# These are CONTAINER ports. The cert-manager-webhook Service publishes 443 and
+# maps it to 10250; NetworkPolicy filters on the container port, so 443 here
+# would be wrong.
+#
+# 10.0.0.0/16 is the VPC CIDR from infra-aws/network, which covers both the
+# node addresses and the API server's path to the webhook. If that CIDR
+# changes this breaks, and it breaks as "certificates stopped issuing" with
+# nothing naming a NetworkPolicy.
+
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-webhook-and-probe-ingress
+  namespace: cert-manager
+  labels:
+    u25c.io/workstream: zerotrust
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - ipBlock:
+            cidr: 10.0.0.0/16
+      ports:
+        - protocol: TCP
+          port: 10250
+        - protocol: TCP
+          port: 6080
+        - protocol: TCP
+          port: 9403
+
+---
+# --- 5. Metrics ingress ----------------------------------------------------
+#
+# Prometheus initiates the connection, so this is ingress to cert-manager from
+# the monitoring namespace - not egress from Prometheus.
+#
+# Every namespace that gets a default-deny needs a rule like this, or its
+# metrics stop arriving. The failure is quiet: no error, no restart, just a
+# target going stale in Prometheus and alerts that never fire because their
+# series no longer exists. Anyone adding a default-deny to another namespace
+# should add this at the same time, in the same pull request.
+#
+# The namespace was renamed from lab-observability to monitoring on
+# 14 August 2026.
+
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-metrics-ingress
+  namespace: cert-manager
+  labels:
+    u25c.io/workstream: zerotrust
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: monitoring
+      ports:
+        - protocol: TCP
+          port: 9402
