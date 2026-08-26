@@ -1,0 +1,98 @@
+###############################################################################
+# app-dev - PERMISSIVE PeerAuthentication
+#
+# Stage one of the mTLS rollout described in ../README.md.
+#
+# WHY app-dev AND NOT A PLATFORM NAMESPACE
+#
+# app-dev is the first and only namespace carrying `istio.io/rev: 1-30-3`
+# (gitops-flux#94). It runs `storefront`, which has been up for 21 hours with an
+# injected sidecar - 2/2 containers - so this is the first namespace where a
+# PeerAuthentication is anything other than inert.
+#
+# It is also the namespace where mTLS eventually matters most. Environments are
+# namespaces in one cluster rather than separate accounts (ADR 0002, ADR 0003),
+# so app-dev and app-prod share a control plane and a network. mTLS is a large
+# part of what puts a boundary back between them.
+#
+# An earlier draft of this file targeted cert-manager and lab-observability.
+# Neither was right: lab-observability was renamed to monitoring on 14 August,
+# and cert-manager carries no injection label, so a policy there enforces
+# nothing.
+#
+# WHAT PERMISSIVE DOES HERE TODAY
+#
+# Almost nothing, and that is the intended state for stage one. PERMISSIVE
+# accepts both mTLS and plaintext on the same port, so nothing that works today
+# stops working. storefront has no dependencies - static fixtures, no database,
+# no outbound calls (apps-business#4) - so there is no service-to-service
+# traffic to encrypt yet.
+#
+# The value of landing it now is that the policy is reviewed and in place before
+# app-stage and app-prod are labelled, rather than being written under time
+# pressure alongside them.
+#
+# BEFORE THIS NAMESPACE GOES STRICT
+#
+# `monitoring` carries no injection label, so Prometheus has no sidecar and no
+# client certificate. Under STRICT a meshed workload rejects it, scraping stops,
+# and the failure is silent - a stale target does not raise an error, and alerts
+# stop firing because the series they depend on no longer exists.
+#
+# storefront has no ServiceMonitor today, so nothing is scraping it and nothing
+# breaks. That changes the moment one is added. Resolve it before promoting this
+# namespace to STRICT, by either meshing `monitoring` or exempting the metrics
+# port with portLevelMtls.
+#
+# storefront serves both the application and /metrics on 8080, so a port-level
+# exemption there would also exempt application traffic. Meshing `monitoring` is
+# the cleaner of the two.
+#
+# WHAT THIS FILE DELIBERATELY DOES NOT DO
+#
+# There is no mesh-wide policy here. The root namespace is `platform-istio`
+# (relocated from istio-system in gitops-flux#72), which holds the ingress
+# gateway - the only pod in the cluster running istio-proxy outside a meshed
+# namespace. External clients arriving through the NLB do not present client
+# certificates, so a mesh-wide STRICT policy would reject them and take the
+# front door down.
+#
+# Mesh-wide comes last, in its own pull request, with the gateway's inbound port
+# exempted via portLevelMtls.
+###############################################################################
+
+apiVersion: security.istio.io/v1
+kind: PeerAuthentication
+metadata:
+  name: default
+  namespace: app-dev
+  labels:
+    u25c.io/workstream: zerotrust
+    u25c.io/owner: zerotrust
+  annotations:
+    u25c.io/rollout-stage: "permissive"
+    u25c.io/promote-to-strict: "after one sprint, and after the Prometheus scrape path is resolved"
+spec:
+  mtls:
+    mode: PERMISSIVE
+
+###############################################################################
+# Namespaces deliberately not covered here
+#
+#   app-stage, app-prod  - not yet labelled for injection. Each gets its own
+#                          pull request when it is, so the blast radius stays
+#                          one namespace.
+#   platform-istio       - root namespace, holds the ingress gateway. Anything
+#                          here affects north-south traffic; handled last.
+#   monitoring           - not meshed. See the STRICT note above; it needs a
+#                          decision rather than a default.
+#   kube-system          - control plane components, several of which will never
+#                          be meshed.
+#   flux-system          - Flux reconciles the mesh itself. Meshing the thing
+#                          that manages the mesh is a bootstrapping problem.
+#   karpenter, keda      - must keep working during a mesh outage.
+#   sealed-secrets       - recovery path must not depend on the mesh.
+#   cert-manager,
+#   external-dns         - platform components, not labelled. No benefit until
+#                          something meshed talks to them.
+###############################################################################
