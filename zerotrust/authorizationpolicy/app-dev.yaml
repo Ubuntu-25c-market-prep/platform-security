@@ -1,0 +1,130 @@
+###############################################################################
+# app-dev - default-deny AuthorizationPolicy, with one allow
+#
+# Part of #8. First namespace of a per-namespace rollout.
+#
+# This is the third layer of the same idea, and the three are deliberately not
+# the same thing:
+#
+#   NetworkPolicy (#9)  can this pod open a connection at all
+#   mTLS (#7)           does the caller have a verifiable identity
+#   this                is that identity allowed to do this, on this path
+#
+# A caller can pass the first two and still be refused here. That is the point -
+# "assume breach" means assuming any single layer fails.
+#
+# WHY app-dev
+#
+# It is the only namespace carrying `istio.io/rev: 1-30-3` (gitops-flux#94), and
+# `storefront` runs there with an injected sidecar. AuthorizationPolicy is
+# enforced BY the sidecar, so in any unmeshed namespace this file would be
+# accepted and enforce nothing - the same silent failure as a NetworkPolicy
+# under a CNI with enforcement disabled.
+#
+# ORDER OF EVALUATION - THIS IS THE PART THAT SURPRISES PEOPLE
+#
+# Istio does not merge these into one rule set the way a firewall might. For a
+# given workload: if any DENY policy matches, the request is denied. Otherwise,
+# if no ALLOW policy applies to the workload at all, the request is allowed.
+# Otherwise the request must match one of the ALLOW rules.
+#
+# So the deny-all below is not decoration. Without it, deleting the allow rule
+# would not close the namespace - it would open it, because a workload with no
+# ALLOW policy is unrestricted. The two objects are a pair and must be reviewed
+# as one.
+###############################################################################
+
+# --- 1. Deny everything -----------------------------------------------------
+#
+# An empty `spec` with no selector and no rules is Istio's documented deny-all:
+# it applies to every workload in the namespace and matches every request.
+#
+# Namespace-scoped, not mesh-wide. A policy in the root namespace
+# (platform-istio) would apply to every meshed workload in the cluster,
+# including the ingress gateway, and would take the front door down.
+
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata:
+  name: default-deny
+  namespace: app-dev
+  labels:
+    u25c.io/workstream: zerotrust
+    u25c.io/owner: zerotrust
+spec: {}
+
+---
+# --- 2. Allow the ingress gateway to reach the API ---------------------------
+#
+# storefront serves five paths on 8080: /api/products, /api/products/{id},
+# /healthz, /readyz and /metrics (apps-business#4). Only the two API paths are
+# reachable from outside, and only through the gateway.
+#
+# `principals` is the caller's SPIFFE identity, taken from the client
+# certificate the mesh issued it - not an IP and not a label, so it cannot be
+# spoofed by something that merely sits in the right namespace. This is the
+# dependency on mTLS: without a certificate there is no principal to match, and
+# the request falls through to the deny.
+#
+# PROBES NEED NO RULE HERE, and this differs from the NetworkPolicy layer.
+# Istio rewrote storefront's probes to /app-health/storefront/livez on port
+# 15020, which is the sidecar's own port and outside this policy's scope. The
+# kubelet never reaches 8080. Verified on the running pod, not assumed - at the
+# NetworkPolicy layer the kubelet DOES hit the app port directly and needed an
+# explicit allow, so the same question has opposite answers in the two layers.
+#
+# /metrics IS DELIBERATELY NOT ALLOWED.
+#
+# Prometheus runs in `monitoring`, which is not meshed, so it has no certificate
+# and no principal. There is no rule that could admit it without also admitting
+# anything else unauthenticated. Nothing scrapes storefront today - it has no
+# ServiceMonitor - so nothing breaks on merge. Adding one would fail
+# immediately, and quietly: a scrape returning 403 shows as a stale target, not
+# an alert.
+#
+# This is the third layer where `monitoring` being unmeshed bites. It also
+# blocks STRICT mTLS in #7 and needs a rule at the NetworkPolicy layer in #9.
+# One fix - label `monitoring` for injection - resolves all three. That is a
+# decision for @monitoring, not something to work around three times.
+
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata:
+  name: allow-gateway-to-api
+  namespace: app-dev
+  labels:
+    u25c.io/workstream: zerotrust
+    u25c.io/owner: zerotrust
+spec:
+  selector:
+    matchLabels:
+      app: storefront
+  action: ALLOW
+  rules:
+    - from:
+        - source:
+            principals:
+              - cluster.local/ns/platform-istio/sa/istio-ingressgateway
+      to:
+        - operation:
+            methods:
+              - GET
+            paths:
+              - /api/products
+              - /api/products/*
+
+###############################################################################
+# Not covered here
+#
+#   app-stage, app-prod  - not meshed. Each gets its own pull request when it
+#                          is, so the blast radius stays one namespace.
+#   platform-istio       - root namespace. A policy here applies mesh-wide and
+#                          reaches the ingress gateway. Last, and separately.
+#   everything else      - unmeshed, so a policy would enforce nothing.
+#
+# storefront runs as the `default` ServiceAccount, so it has no identity of its
+# own. That does not affect this file, which governs who may reach storefront
+# rather than who storefront is - but it does mean the workload cannot be
+# distinguished from anything else scheduled into app-dev. Raised separately;
+# it belongs to #10.
+###############################################################################
